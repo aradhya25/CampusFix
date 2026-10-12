@@ -3,6 +3,9 @@ const mongoose = require('mongoose');
 const Issue = require('../models/Issue');
 const { requireAuth, allowRoles } = require('../middleware/auth');
 const { validate, isObject } = require('../middleware/validate');
+const { calculateSla } = require('../utils/sla');
+const imageStorage = require('../services/cloudinary');
+const { parseImage, validateImageSignature } = require('../middleware/imageUpload');
 
 const router = express.Router();
 const categories = ['facilities', 'cleanliness', 'it', 'safety', 'other'];
@@ -41,6 +44,11 @@ function validId(req, res, next) {
 
 function ownerFilter(req) {
   return req.user.role === 'student' ? { createdBy: req.user.id } : {};
+}
+
+function withSla(issue) {
+  const plainIssue = typeof issue.toObject === 'function' ? issue.toObject() : issue;
+  return { ...plainIssue, sla: calculateSla(plainIssue) };
 }
 
 router.use(requireAuth);
@@ -107,7 +115,7 @@ router.get('/', async (req, res) => {
       .limit(limit);
   }
   const [issues, total] = await Promise.all([issuesQuery, Issue.countDocuments(filter)]);
-  return res.json({ issues, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+  return res.json({ issues: issues.map(withSla), pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
 });
 
 router.get('/stats', async (req, res) => {
@@ -122,22 +130,91 @@ router.get('/stats', async (req, res) => {
   return res.json({ total, byStatus: statusCounts, byCategory: Object.fromEntries(byCategory.map(({ _id, count }) => [_id, count])) });
 });
 
-router.post('/', validate((req) => issueInput(req, true)), async (req, res) => {
-  const issue = await Issue.create({ ...req.body, createdBy: req.user._id });
-  return res.status(201).json({ issue });
+router.post('/', parseImage, validateImageSignature, validate((req) => issueInput(req, true)), async (req, res) => {
+  if (req.file && !imageStorage.isConfigured()) {
+    return res.status(503).json({ message: 'Image uploads are not configured. Contact the CampusFix administrator.' });
+  }
+  const createdAt = new Date();
+  let storedImage;
+  try {
+    if (req.file) {
+      const uploaded = await imageStorage.uploadImage(req.file.buffer);
+      storedImage = { ...uploaded, mimeType: req.file.mimetype };
+    }
+    const issue = await Issue.create({
+      ...req.body,
+      ...(storedImage && { image: storedImage }),
+      createdBy: req.user._id,
+      activity: [{ action: 'reported', fromStatus: null, toStatus: 'open', actor: req.user._id, changedAt: createdAt }],
+    });
+    return res.status(201).json({ issue: withSla(issue) });
+  } catch (error) {
+    if (storedImage) {
+      try {
+        await imageStorage.deleteImage(storedImage.publicId);
+      } catch (cleanupError) {
+        console.error('Could not remove unreferenced uploaded image:', cleanupError.message);
+      }
+    }
+    if (req.file && !storedImage) {
+      const providerStatus = Number(error.http_code || error.statusCode);
+      const providerError = error.cloudinaryResponse || {
+        httpStatus: providerStatus || null,
+        errorCode: null,
+        message: null,
+      };
+      console.error('Cloudinary image upload failed:', JSON.stringify(providerError));
+      const message = providerStatus === 401
+        ? 'Cloudinary rejected the backend credentials. Check that the cloud name, API key, and API secret belong to the same product environment. No issue was created.'
+        : providerStatus === 403
+          ? 'Cloudinary denied the upload. Check that this product environment API key can create uploads and that account upload restrictions allow them. No issue was created.'
+          : 'Image upload failed. Please retry; no issue was created.';
+      return res.status(502).json({ message, providerError });
+    }
+    throw error;
+  }
 });
 
 router.get('/:id', validId, async (req, res) => {
-  const issue = await Issue.findOne({ _id: req.params.id, ...ownerFilter(req) }).populate('createdBy', 'name email');
+  const issue = await Issue.findOne({ _id: req.params.id, ...ownerFilter(req) })
+    .populate('createdBy', 'name email role')
+    .populate('activity.actor', 'name role');
   if (!issue) return res.status(404).json({ message: 'Issue not found' });
-  return res.json({ issue });
+  return res.json({ issue: withSla(issue) });
 });
 
 router.patch('/:id', validId, validate((req) => issueInput(req, false, req.user?.role === 'staff')), async (req, res) => {
   const filter = { _id: req.params.id, ...ownerFilter(req) };
-  const issue = await Issue.findOneAndUpdate(filter, { $set: req.body }, { new: true, runValidators: true }).populate('createdBy', 'name email');
+  const update = { $set: req.body };
+  let updateFilter = filter;
+  let expectedStatus;
+
+  if (req.user.role === 'staff' && req.body.status) {
+    const current = await Issue.findOne(filter).select('status');
+    if (!current) return res.status(404).json({ message: 'Issue not found' });
+    if (current.status !== req.body.status) {
+      expectedStatus = current.status;
+      updateFilter = { ...filter, status: expectedStatus };
+      update.$push = { activity: {
+        action: 'status-change',
+        fromStatus: current.status,
+        toStatus: req.body.status,
+        actor: req.user._id,
+        note: req.body.resolutionNotes || '',
+        changedAt: new Date(),
+      } };
+    }
+  }
+
+  const issue = await Issue.findOneAndUpdate(updateFilter, update, { new: true, runValidators: true })
+    .populate('createdBy', 'name email role')
+    .populate('activity.actor', 'name role');
+  if (!issue && expectedStatus) {
+    const stillExists = await Issue.exists(filter);
+    if (stillExists) return res.status(409).json({ message: 'Issue status changed at the same time. Refresh and try again.' });
+  }
   if (!issue) return res.status(404).json({ message: 'Issue not found' });
-  return res.json({ issue });
+  return res.json({ issue: withSla(issue) });
 });
 
 router.delete('/:id', validId, async (req, res) => {

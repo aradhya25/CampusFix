@@ -10,6 +10,8 @@ Requirements: Node.js 18+ and a reachable MongoDB instance.
 2. Install dependencies with `npm install` if needed.
 3. Start the API with `npm run dev` (or `npm start`). The default API address is `http://localhost:5000`.
 4. Check `GET /api/health` for a process health response. Database connection errors prevent the server from listening.
+5. Optional SLA targets can be set in `server/.env` with `SLA_TARGET_URGENT_HOURS`, `SLA_TARGET_HIGH_HOURS`, `SLA_TARGET_MEDIUM_HOURS`, and `SLA_TARGET_LOW_HOURS`. Defaults are 4, 24, 72, and 120 hours respectively. Values must be positive numbers; invalid values fall back to defaults.
+6. To enable photo uploads, create a Cloudinary account and set `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in `server/.env`. Restart the backend after configuration. Without these values, normal JSON issue creation works and image uploads return `503`.
 
 Create staff using the controlled setup command, from `server/`, with `STAFF_NAME`, `STAFF_EMAIL`, and a unique `STAFF_PASSWORD` of at least 12 characters set in the environment. Run `npm run create:staff`. The command refuses to change an existing account. Public registration always creates a student and ignores a submitted role.
 
@@ -19,7 +21,7 @@ From `client/`, copy `.env.example` to `.env.local` if the API is not at the loc
 
 ## API
 
-All protected routes require `Authorization: Bearer <token>`. JSON request bodies use `Content-Type: application/json`.
+All protected routes require `Authorization: Bearer <token>`. JSON requests use `Content-Type: application/json`; issue creation also accepts `multipart/form-data` when uploading an optional photo.
 
 | Method | Path | Access | Purpose |
 | --- | --- | --- | --- |
@@ -38,6 +40,18 @@ Issue fields: `title` (4–120 chars), `description` (10–2000 chars), `categor
 List query parameters: `status`, `category`, `priority`, `search`, `page` (default 1), `limit` (default 10, maximum 100), and `sort` (`newest`, `oldest`, or `priority`; default `newest`). Priority sort orders urgent, high, medium, then low, with newest first within each priority. Responses contain `issues` and pagination metadata (`page`, `limit`, `total`, `pages`). Statistics return `total`, `byStatus`, and `byCategory` maps.
 
 Issue creation accepts `title`, `description`, `category`, `location`, and optional `priority`. Priority supports `low`, `medium`, `high`, and `urgent`, and defaults to `medium`. Students can edit or delete their own issues. Staff can update status and priority and save optional `resolutionNotes` (up to 2000 characters); those notes are displayed in issue details.
+
+New issues receive a server-generated `activity` entry for their report. Each staff status transition appends an entry containing the prior and next status, staff actor, timestamp, and current resolution note (if provided). Clients cannot submit or edit `activity`; student access and issue ownership rules still apply. Existing issues created before activity tracking may have an empty activity history.
+
+Issue list, create, read, and update responses include an additive `sla` object calculated on the server from `createdAt`, priority, and configured target hours: `{ "ageHours": 25, "targetHours": 24, "dueAt": "...", "isOverdue": true }`. Open and in-progress issues are marked overdue after their target; resolved and closed issues are never marked overdue. Statistics keep their existing `{ total, byStatus, byCategory }` response shape.
+
+### Photo attachments
+
+`POST /api/issues` remains JSON-compatible. With a photo, send the same issue fields as `multipart/form-data` and add one file field named `image`. The authenticated backend accepts JPEG, PNG, and WebP up to 5 MB. It validates the MIME type and file signature, uploads to the private-configured Cloudinary account, and only then saves the issue with an `image` object containing its HTTPS URL, Cloudinary public ID, format, MIME type, and byte size. Existing issues without an `image` remain valid. Upload failure returns `502` and creates no issue; the response includes a sanitized `providerError` object (`httpStatus`, `errorCode`, and `message`) for troubleshooting, with no credentials or signatures. If the database save fails after Cloudinary succeeds, the backend attempts to remove the unreferenced upload. A missing Cloudinary configuration returns `503` for image uploads only.
+
+Cloudinary credentials belong only in `server/.env` (see `server/.env.example`). Never add them to React source, `client/.env`, `VITE_*`, or Git. The backend uses a signed upload with the configured Cloudinary product environment API key and secret. If Cloudinary returns HTTP 403, check the key assigned to that product environment in **Console Settings > API Keys** (or **Console Settings > Role Management > API Keys** on accounts using the new permissions system): the key must have permission to create uploads. Also check any account or product-environment upload restrictions. The live error observed during this fix was `Request forbidden due to missing permissions (actions=["create"])`; no credential values are included in the diagnostic. The uploaded image is displayed in the expanded issue details in student and staff dashboards. Images can be attached during issue creation; changing/removing a stored image is not exposed through the issue update API.
+
+Postman photo request: select `POST {{baseUrl}}/api/issues`, set Authorization to Bearer `{{studentToken}}`, choose Body → form-data, add text fields `title`, `description`, `category`, `location`, and `priority`, then add a File field named `image` and select a JPEG, PNG, or WebP no larger than 5 MB. Expect `201` and `{ "issue": { ..., "image": { "url": "https://...", "publicId": "...", "format": "png", "mimeType": "image/png", "bytes": 12345 } } }`. To verify persistence after reload, call authenticated `GET {{baseUrl}}/api/issues/{{issueId}}`; the `issue.image.url` field remains in the response. Invalid type/signature returns `400`, oversize returns `413`, missing token returns `401`, and missing Cloudinary configuration returns `503`.
 
 ## Postman test plan
 
@@ -98,3 +112,11 @@ Expected response shape:
 ```
 
 Run `npm test` in `server/` for the health/not-found tests and mocked issue-route tests. The issue tests exercise Express routing, JWT verification, student/staff scoping, every status filter, search escaping, and pagination with fixture data; they do not verify MongoDB query execution or persistence. For that, set up MongoDB and follow the Postman plan with real student/staff tokens.
+
+### Activity and SLA verification
+
+After a staff member changes an issue status, retrieve its details with `GET {{baseUrl}}/api/issues/{{issueId}}` and a valid Bearer token. The response is `{ "issue": { ..., "activity": [{ "action": "reported", "fromStatus": null, "toStatus": "open", "actor": { "name": "A Student", "role": "student" }, "changedAt": "..." }, { "action": "status-change", "fromStatus": "open", "toStatus": "in-progress", "actor": { "name": "Campus Staff", "role": "staff" }, "note": "...", "changedAt": "..." }], "sla": { ... } } }`. As a student, use only an issue you own; trying another issue returns `404`. Attempting to send `activity` in a PATCH request returns `400`.
+
+SLA utility tests and mocked route tests run without MongoDB. The route test suite uses fake model results, so a live MongoDB connection is still needed to verify embedded activity persistence, populated actor data, and end-to-end issue create/status transitions. Use the Postman detail request above after starting MongoDB and the API.
+
+Photo upload route tests mock Cloudinary and MongoDB model writes. They cover unauthenticated uploads, invalid MIME/signature, oversize rejection, successful metadata persistence, provider failure, and cleanup after a failed database save. They do not contact Cloudinary or MongoDB. Configure real Cloudinary credentials and a reachable MongoDB instance, then follow the Postman photo request to verify provider credentials, durable storage, and image display in both dashboards.

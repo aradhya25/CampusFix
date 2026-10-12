@@ -297,12 +297,39 @@ const PRIORITIES = ['low', 'medium', 'high', 'urgent']
 
 function ReportPage({ onCreated }) {
   const [form, setForm] = useState({ title: '', description: '', category: 'facilities', location: '', priority: 'medium' })
+  const [image, setImage] = useState(null)
+  const [imagePreview, setImagePreview] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
 
+  useEffect(() => {
+    return () => { if (imagePreview) URL.revokeObjectURL(imagePreview) }
+  }, [imagePreview])
+
   function update(event) {
     setForm((current) => ({ ...current, [event.target.name]: event.target.value }))
+  }
+
+  function selectImage(event) {
+    const selected = event.target.files?.[0]
+    event.target.value = ''
+    setError('')
+    if (!selected) return
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(selected.type)) {
+      setImage(null)
+      setImagePreview('')
+      setError('Choose a JPEG, PNG, or WebP image.')
+      return
+    }
+    if (selected.size > 5 * 1024 * 1024) {
+      setImage(null)
+      setImagePreview('')
+      setError('Image must be 5 MB or smaller.')
+      return
+    }
+    setImage(selected)
+    setImagePreview(URL.createObjectURL(selected))
   }
 
   async function submit(event) {
@@ -315,9 +342,11 @@ function ReportPage({ onCreated }) {
     if (!form.location.trim()) return setError('Add a location so staff can find the issue.')
     setBusy(true)
     try {
-      await api.createIssue({ ...form, title: form.title.trim(), description: form.description.trim(), location: form.location.trim() })
+      await api.createIssue({ ...form, title: form.title.trim(), description: form.description.trim(), location: form.location.trim() }, image)
       setSuccess('Your report has been submitted.')
       setForm({ title: '', description: '', category: 'facilities', location: '', priority: 'medium' })
+      setImage(null)
+      setImagePreview('')
       window.setTimeout(onCreated, 700)
     } catch (requestError) {
       setError(requestError.message)
@@ -341,6 +370,8 @@ function ReportPage({ onCreated }) {
             <Field label="Location *" name="location" value={form.location} onChange={update} placeholder="Building, floor, or area" maxLength={120} required />
           </div>
           <label className="field"><span>Priority *</span><select name="priority" value={form.priority} onChange={update} required>{PRIORITIES.map((priority) => <option value={priority} key={priority}>{priority[0].toUpperCase() + priority.slice(1)}</option>)}</select></label>
+          <label className="field"><span>Photo attachment <small>(optional, JPEG / PNG / WebP, up to 5 MB)</small></span><input type="file" accept="image/jpeg,image/png,image/webp" onChange={selectImage} disabled={busy} /></label>
+          {imagePreview && <div className="image-preview"><img src={imagePreview} alt="Preview of the selected issue attachment" /><div><strong>{image?.name}</strong><small>{(image?.size / (1024 * 1024)).toFixed(2)} MB</small><button type="button" className="button button-quiet" onClick={() => { setImage(null); setImagePreview('') }} disabled={busy}>Remove photo</button></div></div>}
           <div className="form-actions"><a className="button button-quiet" href="#/dashboard">Cancel</a><button className="button button-primary" type="submit" disabled={busy}>{busy ? 'Submitting…' : 'Submit report'} <span aria-hidden="true">→</span></button></div>
         </form>
       </section>
@@ -421,12 +452,34 @@ function IssueList({ issues, loading, staff = false, student = false, updatingId
 
 function IssueCard({ issue, staff, student, updating, onUpdate, onUpdated }) {
   const [expanded, setExpanded] = useState(false)
+  const [detail, setDetail] = useState(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState('')
   const [editing, setEditing] = useState(false)
   const [editForm, setEditForm] = useState({ title: issue.title, description: issue.description, category: issue.category, location: issue.location })
   const [notes, setNotes] = useState(issue.resolutionNotes || '')
   const [saving, setSaving] = useState(false)
   const [actionError, setActionError] = useState('')
   const date = useMemo(() => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(issue.createdAt)), [issue.createdAt])
+
+  function toggleDetails() {
+    const willExpand = !expanded
+    setExpanded(willExpand)
+    if (willExpand) {
+      setDetailLoading(true)
+      setDetailError('')
+    }
+  }
+
+  useEffect(() => {
+    if (!expanded) return undefined
+    let active = true
+    api.getIssue(issue._id)
+      .then((response) => { if (active) setDetail(response.issue) })
+      .catch((requestError) => { if (active) setDetailError(requestError.message) })
+      .finally(() => { if (active) setDetailLoading(false) })
+    return () => { active = false }
+  }, [expanded, issue._id])
 
   async function saveStudentEdit(event) {
     event.preventDefault()
@@ -466,7 +519,7 @@ function IssueCard({ issue, staff, student, updating, onUpdate, onUpdated }) {
 
   return (
     <article className="issue-card">
-      <button className="issue-card-main" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+      <button className="issue-card-main" onClick={toggleDetails} aria-expanded={expanded}>
         <span className="issue-category-icon">{issue.category === 'it' ? '⌘' : issue.category === 'safety' ? '◇' : issue.category === 'cleanliness' ? '✳' : '⌂'}</span>
         <span className="issue-main-copy"><strong>{issue.title}</strong><span>{issue.category} <i>•</i> {issue.location}</span></span>
         <span className="issue-reporter">{staff ? `By ${issue.createdBy?.name || 'Campus user'} · ${date}` : date}</span>
@@ -476,6 +529,8 @@ function IssueCard({ issue, staff, student, updating, onUpdate, onUpdated }) {
       </button>
       {expanded && <div className="issue-expanded">
         {actionError && <div className="alert alert-error" role="alert">{actionError}</div>}
+        {detailLoading && <LoadingState label="Loading issue details…" compact />}
+        {detailError && <div className="alert alert-error" role="alert">{detailError}</div>}
         {editing ? (
           <form className="issue-edit-form" onSubmit={saveStudentEdit}>
             <Field label="Issue title" name="title" value={editForm.title} onChange={updateEditField} maxLength={120} required />
@@ -483,16 +538,39 @@ function IssueCard({ issue, staff, student, updating, onUpdate, onUpdated }) {
             <div className="form-row"><label className="field"><span>Category</span><select name="category" value={editForm.category} onChange={updateEditField}>{CATEGORIES.map((category) => <option value={category} key={category}>{category[0].toUpperCase() + category.slice(1)}</option>)}</select></label><Field label="Location" name="location" value={editForm.location} onChange={updateEditField} maxLength={120} required /></div>
             <div className="form-actions"><button className="button button-quiet" type="button" onClick={() => setEditing(false)}>Keep current report</button><button className="button button-primary" disabled={saving} type="submit">{saving ? 'Saving…' : 'Save changes'}</button></div>
           </form>
-        ) : <>
+        ) : !detailLoading && !detailError && <>
           <div className="issue-description"><span className="detail-label">DESCRIPTION</span><p>{issue.description}</p></div>
-          <div className="issue-meta"><span><small>Reported</small><strong>{date}</strong></span><span><small>Priority</small><PriorityBadge priority={issue.priority} /></span><span><small>Location</small><strong>{issue.location}</strong></span></div>
+          {(detail?.image || issue.image)?.url && <a className="issue-image-link" href={(detail?.image || issue.image).url} target="_blank" rel="noreferrer"><img className="issue-image" src={(detail?.image || issue.image).url} alt={`Photo attached to ${issue.title}`} loading="lazy" /></a>}
+          <div className="issue-meta"><span><small>Reported</small><strong>{date}</strong></span><span><small>Priority</small><PriorityBadge priority={issue.priority} /></span><span><small>Location</small><strong>{issue.location}</strong></span><span><small>Age / resolution target</small><strong>{formatIssueAge(issue.sla?.ageHours)} / {issue.sla?.targetHours ?? '—'} hours</strong></span></div>
+          {issue.sla?.isOverdue && <p className="sla-indicator overdue" role="status">Overdue · target was {new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(issue.sla.dueAt))}</p>}
           <p className="resolution-note"><strong>Resolution notes</strong><span>{issue.resolutionNotes || 'No resolution notes yet.'}</span></p>
+          <IssueTimeline activity={detail?.activity || []} />
           {staff && <StaffIssueControls issue={issue} notes={notes} setNotes={setNotes} updating={updating} onUpdate={onUpdate} />}
           {student && <div className="issue-actions"><button className="button button-secondary" onClick={() => { setActionError(''); setEditing(true) }} disabled={saving}>Edit report</button><button className="button button-danger-quiet" onClick={cancelReport} disabled={saving}>{saving ? 'Cancelling…' : 'Cancel report'}</button></div>}
         </>}
       </div>}
     </article>
   )
+}
+
+function formatIssueAge(ageHours = 0) {
+  if (ageHours < 1) return `${Math.max(0, Math.round(ageHours * 60))} min`
+  if (ageHours < 24) return `${ageHours} hours`
+  return `${Math.floor(ageHours / 24)} days`
+}
+
+function IssueTimeline({ activity }) {
+  if (!activity.length) return <div className="timeline-empty">No activity history is available for this issue yet.</div>
+  return <section className="issue-timeline" aria-label="Issue activity history">
+    <h3>Activity history</h3>
+    <ol>{activity.map((entry) => <li key={entry._id || `${entry.action}-${entry.changedAt}`}>
+      <span className="timeline-marker" aria-hidden="true" />
+      <div><strong>{entry.action === 'reported' ? 'Issue reported' : `Status changed: ${STATUS_LABELS[entry.fromStatus] || entry.fromStatus} → ${STATUS_LABELS[entry.toStatus] || entry.toStatus}`}</strong>
+        <p>By {entry.actor?.name || 'CampusFix user'} · {new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(entry.changedAt))}</p>
+        {entry.note && <p className="timeline-note">{entry.note}</p>}
+      </div>
+    </li>)}</ol>
+  </section>
 }
 
 function StaffIssueControls({ issue, notes, setNotes, updating, onUpdate }) {

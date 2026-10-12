@@ -32,15 +32,16 @@ export function getSavedUser() {
 async function request(path, options = {}) {
   const headers = { Accept: 'application/json', ...options.headers };
   const token = getToken();
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
   if (token) headers.Authorization = `Bearer ${token}`;
-  if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+  if (options.body !== undefined && !isFormData) headers['Content-Type'] = 'application/json';
 
   let response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...options,
       headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      body: options.body === undefined ? undefined : isFormData ? options.body : JSON.stringify(options.body),
     });
   } catch {
     throw new Error(`Can't reach the CampusFix API at ${API_BASE_URL}. Check that the backend is running.`);
@@ -62,7 +63,11 @@ async function request(path, options = {}) {
     }
     const detail = data?.message || `Request failed (${response.status}).`;
     const validation = Array.isArray(data?.errors) ? ` ${data.errors.join('. ')}` : '';
-    throw new Error(`${detail}${validation}`);
+    const provider = data?.providerError;
+    const providerDetail = provider
+      ? ` Cloudinary response: HTTP ${provider.httpStatus ?? 'unknown'}, code ${provider.errorCode ?? 'none'}${provider.message ? ` — ${provider.message}` : ''}.`
+      : '';
+    throw new Error(`${detail}${validation}${providerDetail}`);
   }
   return data;
 }
@@ -79,7 +84,14 @@ export const api = {
     return request(`/issues${suffix}`);
   },
   getStats: () => request('/issues/stats'),
-  createIssue: (issue) => request('/issues', { method: 'POST', body: issue }),
+  getIssue: (id) => request(`/issues/${encodeURIComponent(id)}`),
+  createIssue: (issue, image) => {
+    if (!image) return request('/issues', { method: 'POST', body: issue });
+    const form = new FormData();
+    Object.entries(issue).forEach(([key, value]) => form.append(key, value));
+    form.append('image', image, image.name);
+    return request('/issues', { method: 'POST', body: form });
+  },
   updateIssue: (id, changes) => request(`/issues/${encodeURIComponent(id)}`, { method: 'PATCH', body: changes }),
   deleteIssue: (id) => request(`/issues/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };

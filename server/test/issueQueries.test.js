@@ -55,6 +55,8 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
     aggregate: Issue.aggregate,
     populate: Issue.populate,
     find: Issue.find,
+    findOne: Issue.findOne,
+    exists: Issue.exists,
     create: Issue.create,
     findOneAndUpdate: Issue.findOneAndUpdate,
     findOneAndDelete: Issue.findOneAndDelete,
@@ -110,9 +112,23 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
     observed.creates.push(issue);
     return { _id: ISSUE_ID, priority: 'medium', ...issue };
   };
+  Issue.findOne = (filter) => ({
+    select: async () => ({ status: 'open' }),
+    populate() { return this; },
+    then(resolve) {
+      const detail = String(filter.createdBy || 'student1') === 'student1' ? {
+        _id: ISSUE_ID,
+        title: 'Student issue',
+        createdBy: { name: 'student1', role: 'student' },
+        activity: [{ action: 'reported', actor: { name: 'student1', role: 'student' }, toStatus: 'open', changedAt: new Date() }],
+      } : null;
+      return Promise.resolve(detail).then(resolve);
+    },
+  });
+  Issue.exists = async () => true;
   Issue.findOneAndUpdate = (filter, update) => {
     observed.updates.push({ filter, update });
-    return { populate: async () => ({ _id: ISSUE_ID, ...update.$set }) };
+    return { populate() { return this; }, then(resolve) { return Promise.resolve({ _id: ISSUE_ID, createdAt: new Date(), ...update.$set }).then(resolve); } };
   };
   Issue.findOneAndDelete = async (filter) => {
     observed.deletes.push(filter);
@@ -125,6 +141,8 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
     Issue.aggregate = originals.aggregate;
     Issue.populate = originals.populate;
     Issue.find = originals.find;
+    Issue.findOne = originals.findOne;
+    Issue.exists = originals.exists;
     Issue.create = originals.create;
     Issue.findOneAndUpdate = originals.findOneAndUpdate;
     Issue.findOneAndDelete = originals.findOneAndDelete;
@@ -142,6 +160,13 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
   });
 
   assert.equal((await get('/', null)).status, 401, 'issue endpoints require a bearer token');
+
+  const ownDetailResponse = await get(`/${ISSUE_ID}`, 'student1');
+  assert.equal(ownDetailResponse.status, 200);
+  const ownDetail = await ownDetailResponse.json();
+  assert.equal(ownDetail.issue.activity[0].actor.name, 'student1');
+  assert.equal(ownDetail.issue.activity[0].toStatus, 'open');
+  assert.equal((await get(`/${ISSUE_ID}`, 'student2')).status, 404, 'students cannot read another user\'s issue details');
 
   const staffStatsResponse = await get('/stats', 'staff1');
   assert.equal(staffStatsResponse.status, 200);
@@ -228,7 +253,10 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
       body: JSON.stringify({ ...createBody, priority }),
     });
     assert.equal(response.status, 201);
-    assert.equal((await response.json()).issue.priority, priority);
+    const body = await response.json();
+    assert.equal(body.issue.priority, priority);
+    assert.equal(body.issue.activity[0].action, 'reported');
+    assert.equal(String(body.issue.activity[0].actor), 'student1');
   }
   const invalidPriority = await fetch(baseUrl, {
     method: 'POST',
@@ -256,6 +284,12 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
     body: JSON.stringify({ resolutionNotes: 'I fixed it myself.' }),
   });
   assert.equal(studentNotesPatch.status, 400);
+  const forgedActivityPatch = await fetch(`${baseUrl}/${ISSUE_ID}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${tokenFor('student1')}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ activity: [{ action: 'status-change', toStatus: 'resolved', actor: 'staff1' }] }),
+  });
+  assert.equal(forgedActivityPatch.status, 400);
   const staffPatch = await fetch(`${baseUrl}/${ISSUE_ID}`, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${tokenFor('staff1')}`, 'Content-Type': 'application/json' },
@@ -263,6 +297,11 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
   });
   assert.equal(staffPatch.status, 200);
   assert.deepEqual(observed.updates.at(-1).update.$set, { status: 'resolved', priority: 'urgent', resolutionNotes: 'Repaired the leak.' });
+  assert.deepEqual(observed.updates.at(-1).update.$push.activity, {
+    action: 'status-change', fromStatus: 'open', toStatus: 'resolved', actor: 'staff1',
+    note: 'Repaired the leak.', changedAt: observed.updates.at(-1).update.$push.activity.changedAt,
+  });
+  assert.ok(observed.updates.at(-1).update.$push.activity.changedAt instanceof Date);
   const longNotesPatch = await fetch(`${baseUrl}/${ISSUE_ID}`, {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${tokenFor('staff1')}`, 'Content-Type': 'application/json' },
