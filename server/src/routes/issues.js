@@ -7,14 +7,15 @@ const { validate, isObject } = require('../middleware/validate');
 const router = express.Router();
 const categories = ['facilities', 'cleanliness', 'it', 'safety', 'other'];
 const statuses = ['open', 'in-progress', 'resolved', 'closed'];
-const priorities = ['low', 'medium', 'high'];
-const createFields = ['title', 'description', 'category', 'location'];
-const editableFields = [...createFields, 'status', 'priority'];
+const priorities = ['low', 'medium', 'high', 'urgent'];
+const studentFields = ['title', 'description', 'category', 'location'];
+const createFields = [...studentFields, 'priority'];
+const editableFields = [...studentFields, 'status', 'priority', 'resolutionNotes'];
 
 function issueInput({ body }, creating, staff = false) {
   const errors = [];
   if (!isObject(body)) return ['Request body must be a JSON object'];
-  const allowed = creating ? createFields : staff ? editableFields : createFields;
+  const allowed = creating ? createFields : staff ? editableFields : studentFields;
   for (const field of Object.keys(body)) if (!allowed.includes(field)) errors.push(`Field '${field}' cannot be changed`);
   if (creating || 'title' in body) {
     if (typeof body.title !== 'string' || body.title.trim().length < 4 || body.title.trim().length > 120) errors.push('Title must be 4 to 120 characters');
@@ -28,6 +29,7 @@ function issueInput({ body }, creating, staff = false) {
   }
   if ('status' in body && !statuses.includes(body.status)) errors.push(`Status must be one of: ${statuses.join(', ')}`);
   if ('priority' in body && !priorities.includes(body.priority)) errors.push(`Priority must be one of: ${priorities.join(', ')}`);
+  if ('resolutionNotes' in body && (typeof body.resolutionNotes !== 'string' || body.resolutionNotes.length > 2000)) errors.push('Resolution notes must be 2000 characters or fewer');
   if (!creating && Object.keys(body).length === 0) errors.push('Provide at least one field to update');
   return errors;
 }
@@ -63,6 +65,10 @@ router.get('/', async (req, res) => {
     if (!priorities.includes(req.query.priority)) return res.status(400).json({ message: `priority must be one of: ${priorities.join(', ')}` });
     filter.priority = req.query.priority;
   }
+  const sort = req.query.sort ?? 'newest';
+  if (!['newest', 'oldest', 'priority'].includes(sort)) {
+    return res.status(400).json({ message: 'sort must be one of: newest, oldest, priority' });
+  }
   if (req.query.search !== undefined) {
     if (typeof req.query.search !== 'string' || req.query.search.length > 100) {
       return res.status(400).json({ message: 'search must be 100 characters or fewer' });
@@ -75,10 +81,32 @@ router.get('/', async (req, res) => {
     ];
   }
 
-  const [issues, total] = await Promise.all([
-    Issue.find(filter).populate('createdBy', 'name email').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
-    Issue.countDocuments(filter),
-  ]);
+  let issuesQuery;
+  if (sort === 'priority') {
+    issuesQuery = Issue.aggregate([
+      { $match: filter },
+      { $addFields: { priorityRank: { $switch: {
+        branches: [
+          { case: { $eq: ['$priority', 'urgent'] }, then: 4 },
+          { case: { $eq: ['$priority', 'high'] }, then: 3 },
+          { case: { $eq: ['$priority', 'medium'] }, then: 2 },
+          { case: { $eq: ['$priority', 'low'] }, then: 1 },
+        ],
+        default: 0,
+      } } } },
+      { $sort: { priorityRank: -1, createdAt: -1 } },
+      { $skip: offset },
+      { $limit: limit },
+      { $project: { priorityRank: 0 } },
+    ]).then((issues) => Issue.populate(issues, { path: 'createdBy', select: 'name email' }));
+  } else {
+    issuesQuery = Issue.find(filter)
+      .populate('createdBy', 'name email')
+      .sort({ createdAt: sort === 'oldest' ? 1 : -1 })
+      .skip(offset)
+      .limit(limit);
+  }
+  const [issues, total] = await Promise.all([issuesQuery, Issue.countDocuments(filter)]);
   return res.json({ issues, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
 });
 

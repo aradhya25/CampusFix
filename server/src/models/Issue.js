@@ -6,7 +6,8 @@ const issueSchema = new mongoose.Schema({
   category: { type: String, required: true, enum: ['facilities', 'cleanliness', 'it', 'safety', 'other'] },
   location: { type: String, required: true, trim: true, maxlength: 120 },
   status: { type: String, enum: ['open', 'in-progress', 'resolved', 'closed'], default: 'open' },
-  priority: { type: String, enum: ['low', 'medium', 'high'], default: 'medium' },
+  priority: { type: String, enum: ['low', 'medium', 'high', 'urgent'], default: 'medium' },
+  resolutionNotes: { type: String, trim: true, maxlength: 2000, default: '' },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });
 

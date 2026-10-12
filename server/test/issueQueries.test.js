@@ -1,12 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 
 const previousJwtSecret = process.env.JWT_SECRET;
 process.env.JWT_SECRET = 'test-secret-for-route-tests-only';
 const app = require('../src/app');
 const Issue = require('../src/models/Issue');
 const User = require('../src/models/User');
+const ISSUE_ID = '507f1f77bcf86cd799439011';
 
 const STATUSES = ['open', 'in-progress', 'resolved', 'closed'];
 const fixtures = [
@@ -15,7 +17,20 @@ const fixtures = [
   { _id: 'issue3', title: 'Broken chair', description: 'A chair is broken in room 12.', location: 'Room 12', status: 'resolved', category: 'facilities', priority: 'low', createdBy: 'student1', createdAt: new Date('2025-04-02') },
   { _id: 'issue4', title: 'Hall cleanup', description: 'Please clean the east hall.', location: 'East hall', status: 'closed', category: 'cleanliness', priority: 'low', createdBy: 'student2', createdAt: new Date('2025-04-01') },
   { _id: 'issue5', title: 'Another light', description: 'A second library light is out.', location: 'Library', status: 'open', category: 'facilities', priority: 'medium', createdBy: 'student1', createdAt: new Date('2025-03-31') },
+  { _id: 'issue6', title: 'Urgent water leak', description: 'Water is leaking near the science lab.', location: 'Science lab', status: 'open', category: 'facilities', priority: 'urgent', createdBy: 'student2', createdAt: new Date('2025-04-05') },
 ];
+
+test('priority enum supports each requested value and keeps the medium default', () => {
+  const issue = new Issue({
+    title: 'Priority schema check',
+    description: 'Checking the issue priority schema default.',
+    category: 'facilities',
+    location: 'Main hall',
+    createdBy: new mongoose.Types.ObjectId(),
+  });
+  assert.deepEqual(Issue.schema.path('priority').enumValues, ['low', 'medium', 'high', 'urgent']);
+  assert.equal(issue.priority, 'medium');
+});
 
 function matches(issue, filter) {
   if (filter.createdBy && issue.createdBy !== String(filter.createdBy)) return false;
@@ -38,9 +53,13 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
     findById: User.findById,
     countDocuments: Issue.countDocuments,
     aggregate: Issue.aggregate,
+    populate: Issue.populate,
     find: Issue.find,
+    create: Issue.create,
+    findOneAndUpdate: Issue.findOneAndUpdate,
+    findOneAndDelete: Issue.findOneAndDelete,
   };
-  const observed = { findFilters: [], statsMatches: [] };
+  const observed = { findFilters: [], statsMatches: [], creates: [], updates: [], deletes: [] };
   User.findById = (id) => ({
     select: async () => ({
       _id: id,
@@ -51,21 +70,34 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
     }),
   });
   Issue.countDocuments = async (filter) => fixtures.filter((issue) => matches(issue, filter)).length;
-  Issue.aggregate = async ([{ $match: filter }, { $group: { _id: groupField } }]) => {
-    observed.statsMatches.push(filter);
-    const counts = new Map();
-    for (const issue of fixtures.filter((entry) => matches(entry, filter))) {
-      const field = groupField.slice(1);
-      counts.set(issue[field], (counts.get(issue[field]) || 0) + 1);
+  Issue.aggregate = async (pipeline) => {
+    const filter = pipeline[0].$match;
+    if (pipeline[1].$group) {
+      observed.statsMatches.push(filter);
+      const field = pipeline[1].$group._id.slice(1);
+      const counts = new Map();
+      for (const issue of fixtures.filter((entry) => matches(entry, filter))) {
+        counts.set(issue[field], (counts.get(issue[field]) || 0) + 1);
+      }
+      return [...counts].map(([_id, count]) => ({ _id, count }));
     }
-    return [...counts].map(([_id, count]) => ({ _id, count }));
+    const ranks = { urgent: 4, high: 3, medium: 2, low: 1 };
+    const entries = fixtures.filter((issue) => matches(issue, filter))
+      .sort((a, b) => (ranks[b.priority] - ranks[a.priority]) || (b.createdAt - a.createdAt));
+    const offset = pipeline.find((stage) => '$skip' in stage).$skip;
+    const limit = pipeline.find((stage) => '$limit' in stage).$limit;
+    return entries.slice(offset, offset + limit);
   };
+  Issue.populate = async (issues) => issues;
   Issue.find = (filter) => {
     observed.findFilters.push(filter);
-    const result = fixtures.filter((issue) => matches(issue, filter)).sort((a, b) => b.createdAt - a.createdAt);
+    let result = fixtures.filter((issue) => matches(issue, filter));
     const query = {
       populate() { return this; },
-      sort() { return this; },
+      sort(sortBy) {
+        result.sort((a, b) => sortBy.createdAt === 1 ? a.createdAt - b.createdAt : b.createdAt - a.createdAt);
+        return this;
+      },
       skip(value) { this.offset = value; return this; },
       limit(value) { this.pageLimit = value; return this; },
       then(resolve, reject) {
@@ -74,12 +106,28 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
     };
     return query;
   };
+  Issue.create = async (issue) => {
+    observed.creates.push(issue);
+    return { _id: ISSUE_ID, priority: 'medium', ...issue };
+  };
+  Issue.findOneAndUpdate = (filter, update) => {
+    observed.updates.push({ filter, update });
+    return { populate: async () => ({ _id: ISSUE_ID, ...update.$set }) };
+  };
+  Issue.findOneAndDelete = async (filter) => {
+    observed.deletes.push(filter);
+    return { _id: ISSUE_ID };
+  };
 
   t.after(() => {
     User.findById = originals.findById;
     Issue.countDocuments = originals.countDocuments;
     Issue.aggregate = originals.aggregate;
+    Issue.populate = originals.populate;
     Issue.find = originals.find;
+    Issue.create = originals.create;
+    Issue.findOneAndUpdate = originals.findOneAndUpdate;
+    Issue.findOneAndDelete = originals.findOneAndDelete;
     if (previousJwtSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = previousJwtSecret;
   });
@@ -99,7 +147,7 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
   assert.equal(staffStatsResponse.status, 200);
   const staffStats = await staffStatsResponse.json();
   assert.equal(staffStats.total, fixtures.length);
-  assert.deepEqual(staffStats.byStatus, { open: 2, 'in-progress': 1, resolved: 1, closed: 1 });
+  assert.deepEqual(staffStats.byStatus, { open: 3, 'in-progress': 1, resolved: 1, closed: 1 });
   assert.equal(Object.values(staffStats.byStatus).reduce((sum, count) => sum + count, 0), staffStats.total);
 
   const studentStats = await (await get('/stats', 'student1')).json();
@@ -125,7 +173,7 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
   const page = await pageResponse.json();
   assert.equal(pageResponse.status, 200);
   assert.equal(page.issues.length, 2);
-  assert.deepEqual(page.pagination, { page: 2, limit: 2, total: 5, pages: 3 });
+  assert.deepEqual(page.pagination, { page: 2, limit: 2, total: 6, pages: 3 });
   assert.equal((await get('/?page=0', 'staff1')).status, 400);
   assert.equal((await get('/?page=1.5', 'staff1')).status, 400);
   assert.equal((await get('/?page=9007199254740991&limit=100', 'staff1')).status, 400);
@@ -160,6 +208,70 @@ test('issue statistics and list queries enforce the API contract', async (t) => 
   assert.equal(tooLongSearch.status, 400);
   const repeatedStatus = await get('/?status=open&status=closed', 'staff1');
   assert.equal(repeatedStatus.status, 400);
+
+  const urgentFilter = await (await get('/?priority=urgent', 'staff1')).json();
+  assert.equal(urgentFilter.pagination.total, 1);
+  assert.equal(urgentFilter.issues[0].priority, 'urgent');
+  const prioritySort = await (await get('/?sort=priority&limit=2', 'staff1')).json();
+  assert.deepEqual(prioritySort.issues.map((issue) => issue.priority), ['urgent', 'high']);
+  const oldestSort = await (await get('/?sort=oldest&limit=1', 'staff1')).json();
+  assert.equal(oldestSort.issues[0]._id, 'issue5');
+  const newestSort = await (await get('/?sort=newest&limit=1', 'staff1')).json();
+  assert.equal(newestSort.issues[0]._id, 'issue6');
+  assert.equal((await get('/?sort=unsupported', 'staff1')).status, 400);
+
+  const createBody = { title: 'New campus report', description: 'A detailed campus issue report.', category: 'facilities', location: 'North hall' };
+  for (const priority of ['low', 'medium', 'high', 'urgent']) {
+    const response = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokenFor('student1')}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...createBody, priority }),
+    });
+    assert.equal(response.status, 201);
+    assert.equal((await response.json()).issue.priority, priority);
+  }
+  const invalidPriority = await fetch(baseUrl, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenFor('student1')}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...createBody, priority: 'critical' }),
+  });
+  assert.equal(invalidPriority.status, 400);
+
+  const studentPatch = await fetch(`${baseUrl}/${ISSUE_ID}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${tokenFor('student1')}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Student edited title' }),
+  });
+  assert.equal(studentPatch.status, 200);
+  assert.equal(String(observed.updates.at(-1).filter.createdBy), 'student1');
+  const studentPriorityPatch = await fetch(`${baseUrl}/${ISSUE_ID}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${tokenFor('student1')}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ priority: 'urgent' }),
+  });
+  assert.equal(studentPriorityPatch.status, 400);
+  const studentNotesPatch = await fetch(`${baseUrl}/${ISSUE_ID}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${tokenFor('student1')}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resolutionNotes: 'I fixed it myself.' }),
+  });
+  assert.equal(studentNotesPatch.status, 400);
+  const staffPatch = await fetch(`${baseUrl}/${ISSUE_ID}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${tokenFor('staff1')}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'resolved', priority: 'urgent', resolutionNotes: 'Repaired the leak.' }),
+  });
+  assert.equal(staffPatch.status, 200);
+  assert.deepEqual(observed.updates.at(-1).update.$set, { status: 'resolved', priority: 'urgent', resolutionNotes: 'Repaired the leak.' });
+  const longNotesPatch = await fetch(`${baseUrl}/${ISSUE_ID}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${tokenFor('staff1')}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resolutionNotes: 'x'.repeat(2001) }),
+  });
+  assert.equal(longNotesPatch.status, 400);
+  const studentDelete = await fetch(`${baseUrl}/${ISSUE_ID}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tokenFor('student1')}` } });
+  assert.equal(studentDelete.status, 200);
+  assert.equal(String(observed.deletes[0].createdBy), 'student1');
 
   const studentList = await (await get('/', 'student1')).json();
   assert.ok(studentList.issues.every((issue) => issue.createdBy === 'student1'));

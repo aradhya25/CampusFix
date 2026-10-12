@@ -13,6 +13,10 @@ Requirements: Node.js 18+ and a reachable MongoDB instance.
 
 Create staff using the controlled setup command, from `server/`, with `STAFF_NAME`, `STAFF_EMAIL`, and a unique `STAFF_PASSWORD` of at least 12 characters set in the environment. Run `npm run create:staff`. The command refuses to change an existing account. Public registration always creates a student and ignores a submitted role.
 
+## Run the frontend
+
+From `client/`, copy `.env.example` to `.env.local` if the API is not at the local default, set `VITE_API_URL` (including `/api`), then run `npm install` if needed and `npm run dev`. Vite prints the local client URL, normally `http://localhost:5173`. The default API URL is `http://localhost:5000/api`. Start the backend and connect it to MongoDB for login, registration, and dashboard data. The browser client stores the JWT for the current tab session and clears it on logout or an expired/invalid authenticated request.
+
 ## API
 
 All protected routes require `Authorization: Bearer <token>`. JSON request bodies use `Content-Type: application/json`.
@@ -26,12 +30,14 @@ All protected routes require `Authorization: Bearer <token>`. JSON request bodie
 | GET | `/api/issues` | Student or staff | List; students see their own, staff see all |
 | GET | `/api/issues/stats` | Student or staff | Dashboard counts; student counts are personal |
 | GET | `/api/issues/:id` | Student or staff | Read an issue subject to ownership |
-| PATCH | `/api/issues/:id` | Student or staff | Update; students can edit their own content, staff can also set status/priority |
+| PATCH | `/api/issues/:id` | Student or staff | Students edit own content; staff can set status/priority and resolution notes |
 | DELETE | `/api/issues/:id` | Student or staff | Delete own issue; staff can delete any |
 
-Issue fields: `title` (4–120 chars), `description` (10–2000 chars), `category` (`facilities`, `cleanliness`, `it`, `safety`, `other`), `location` (1–120 chars), `status` (`open`, `in-progress`, `resolved`, `closed`), and `priority` (`low`, `medium`, `high`). Status defaults to `open`; priority defaults to `medium`.
+Issue fields: `title` (4–120 chars), `description` (10–2000 chars), `category` (`facilities`, `cleanliness`, `it`, `safety`, `other`), `location` (1–120 chars), `status` (`open`, `in-progress`, `resolved`, `closed`), and `priority` (`low`, `medium`, `high`, `urgent`). Status defaults to `open`; priority defaults to `medium`.
 
-List query parameters: `status`, `category`, `priority`, `search`, `page` (default 1), and `limit` (default 10, maximum 100). Responses contain `issues` and pagination metadata (`page`, `limit`, `total`, `pages`). Statistics return `total`, `byStatus`, and `byCategory` maps.
+List query parameters: `status`, `category`, `priority`, `search`, `page` (default 1), `limit` (default 10, maximum 100), and `sort` (`newest`, `oldest`, or `priority`; default `newest`). Priority sort orders urgent, high, medium, then low, with newest first within each priority. Responses contain `issues` and pagination metadata (`page`, `limit`, `total`, `pages`). Statistics return `total`, `byStatus`, and `byCategory` maps.
+
+Issue creation accepts `title`, `description`, `category`, `location`, and optional `priority`. Priority supports `low`, `medium`, `high`, and `urgent`, and defaults to `medium`. Students can edit or delete their own issues. Staff can update status and priority and save optional `resolutionNotes` (up to 2000 characters); those notes are displayed in issue details.
 
 ## Postman test plan
 
@@ -40,10 +46,10 @@ Set `baseUrl` to `http://localhost:5000`; save tokens from registration/login as
 1. Call `GET {{baseUrl}}/api/health`; expect `200` and `{ "status": "ok", "service": "campusfix-api" }`.
 2. `POST /api/auth/register` with `{ "name":"A Student", "email":"student1@example.com", "password":"password123", "role":"staff" }`; expect `201`, a JWT, and `user.role` equal to `student`. Repeat with the same email; expect `409`.
 3. Log in with the student credentials; expect `200`. Try a wrong password; expect `401`. Call a protected endpoint without a token; expect `401`.
-4. As the student, `POST /api/issues` with `{ "title":"Broken library light", "description":"The light above desk 4 is flickering.", "category":"facilities", "location":"Main library, floor 2" }`; expect `201`, `status: open`, and `priority: medium`. Try an invalid category or short description; expect `400`.
+4. As the student, `POST /api/issues` with `{ "title":"Broken library light", "description":"The light above desk 4 is flickering.", "category":"facilities", "location":"Main library, floor 2", "priority":"urgent" }`; expect `201`, `status: open`, and `priority: urgent`. Repeat for `low`, `medium`, and `high`; omit priority once and verify the `medium` default. Try an invalid priority, category, or short description; expect `400`.
 5. Create a second student and issue. List issues as the first student; verify the second student's issue is absent. As the first student, try to fetch, patch, and delete the second student's issue ID; each should return `404`. Try to set `status` as a student; expect `400`.
-6. Configure the staff variables and run `npm run create:staff`, then log in as staff. List issues and verify both students' reports are visible. Set an issue to `{ "status":"in-progress", "priority":"high" }`; expect `200`. Staff can read/delete either student's issue.
-7. Test `GET /api/issues?status=in-progress&category=facilities&page=1&limit=5&search=library`; verify returned rows match all filters and pagination totals. Invalid status, page `0`, or limit `101` should return `400`.
+6. Configure the staff variables and run `npm run create:staff`, then log in as staff. List issues and verify both students' reports are visible. Set an issue to `{ "status":"in-progress", "priority":"high", "resolutionNotes":"Replaced the faulty fixture." }`; expect `200`. Staff can read/delete either student's issue.
+7. Test `GET /api/issues?status=in-progress&category=facilities&priority=urgent&page=1&limit=5&search=library&sort=priority`; verify returned rows match all filters and pagination totals. Test `sort=newest` and `sort=oldest`. Invalid status, sort, page `0`, or limit `101` should return `400`.
 8. Call `/api/issues/stats` as staff and as a student; compare global counts with the student's personal counts. Call an unknown path; expect a JSON `404`.
 
 ## Verify
