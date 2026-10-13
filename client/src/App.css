@@ -72,6 +72,7 @@
 .issue-main-copy > span { overflow: hidden; color: #89948f; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; text-transform: capitalize; }
 .issue-main-copy i { margin: 0 4px; color: #bdc6c1; font-style: normal; }
 .issue-reporter { max-width: 130px; overflow: hidden; color: #75827c; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.issue-relative-mobile { display: none; }
 .status-badge { width: max-content; display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 20px; font-size: 10px; font-weight: 600; white-space: nowrap; }
 .status-badge i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .status-open { color: #b4782e; background: #fcf4e9; }
@@ -159,6 +160,9 @@
 .alert { padding: 10px 12px; border-radius: 8px; font-size: 11px; line-height: 1.5; }
 .alert-error { color: #965347; border: 1px solid #f0d9d3; background: #fff7f5; }
 .alert-success { color: #27704f; border: 1px solid #d6ecdf; background: #f1faf4; }
+.toast { position: fixed; z-index: 20; top: 18px; right: 20px; width: min(420px, calc(100vw - 32px)); padding: 13px 14px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid #d6ecdf; border-radius: 10px; color: #27704f; background: #fff; box-shadow: 0 12px 32px rgba(30, 63, 45, .15); font-size: 13px; }
+.toast-error { color: #8d493e; border-color: #f0d9d3; }
+.toast button { flex: 0 0 auto; border: 0; border-radius: 5px; padding: 3px 7px; color: inherit; background: transparent; font-size: 18px; cursor: pointer; }
 .report-panel { max-width: 760px; padding: 23px 27px 24px; }
 .required-note { color: #98a49e; font-size: 10px; }
 .report-form, .form-stack { display: grid; gap: 16px; }
@@ -279,6 +283,7 @@
   .issue-main-copy > strong { font-size: 10px; }
   .issue-main-copy > span { font-size: 9px; }
   .issue-reporter { display: none; }
+  .issue-relative-mobile { display: inline; margin-left: 5px; color: #718079; text-transform: none; }
   .priority-badge { grid-column: 2; grid-row: 2; justify-self: start; padding: 3px 6px; font-size: 8px; }
   .status-badge { grid-column: 3; grid-row: 1 / span 2; gap: 4px; padding: 5px 6px; font-size: 8px; }
   .status-badge i { width: 5px; height: 5px; }
